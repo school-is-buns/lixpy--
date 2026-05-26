@@ -17,8 +17,8 @@
   // ── LixPy Mailer — Vercel serverless endpoint ──────────────────────────────
   // After deploying lixpy-mailer to Vercel, paste your deployment URL below.
   // Example: 'https://lixpy-mailer.vercel.app'
-  // Leave as 'PASTE_YOUR_VERCEL_URL_HERE' until you have deployed.
-  const MAILER_URL = 'PASTE_YOUR_VERCEL_URL_HERE';
+  // Leave as 'lixpy-mailer.vercel.app' until you have deployed.
+  const MAILER_URL = 'lixpy-mailer.vercel.app';
 </script>
 <script src="https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide.js"></script>
 <style>
@@ -643,7 +643,7 @@ async function doForgotPassword() {
   }
 
   // Check Vercel URL is configured
-  if (!MAILER_URL || MAILER_URL === 'PASTE_YOUR_VERCEL_URL_HERE') {
+  if (!MAILER_URL || MAILER_URL === 'lixpy-mailer.vercel.app') {
     pe('Mailer not configured yet.');
     pd('  Deploy lixpy-mailer to Vercel and paste the URL into lixpy.html.');
     pd('  See the setup instructions that came with your files.');
