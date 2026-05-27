@@ -337,6 +337,9 @@ const sc = {
   suppressedIdx:  new Set(),  // history indices that are passwords
 };
 
+// User-defined aliases
+let userAliases = {};
+
 // Fake processes
 const PROCS = [
   {pid:1,  user:'root', cpu:'0.0',mem:'0.1',cmd:'init'},
@@ -643,7 +646,7 @@ async function doForgotPassword() {
   }
 
   // Check Vercel URL is configured
-  if (! ||  === 'https://lixpy-mailer.vercel.app') {
+  if (!MAILER_URL || MAILER_URL === 'PASTE_YOUR_VERCEL_URL_HERE') {
     pe('Mailer not configured yet.');
     pd('  Deploy lixpy-mailer to Vercel and paste the URL into lixpy.html.');
     pd('  See the setup instructions that came with your files.');
@@ -660,7 +663,7 @@ async function doForgotPassword() {
   pd('  This may take a few seconds…');
 
   try {
-    const resp = await fetch( + '/api/send-reset', {
+    const resp = await fetch(MAILER_URL + '/api/send-reset', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -692,7 +695,7 @@ async function doForgotPassword() {
 
   } catch(e) {
     pe('Failed to send email: ' + e.message);
-    pd('  Make sure your Vercel deployment is live and RESEND_API_KEY is set.');
+    pd('  Make sure your Vercel deployment is live and GMAIL_USER / GMAIL_APP_PASSWORD are set in Vercel.');
     pendingResetCode = null; pendingResetExpiry = null;
   }
 }
@@ -940,7 +943,7 @@ const ALL_CMDS=['ls','cd','pwd','mkdir','rmdir','touch','rm','cat','echo','cp','
   'curl','wget','open','xdg-open','camera','webcam','mic','microphone','geolocate',
   'location','battery','sysinfo','netinfo','ifconfig','lscpu','lsusb','lspci',
   'clipboard','notify','upload','download','perms','passwd','lx','lxpkg',
-  'lixpy','wipe','clear','help','exit'];
+  'lixpy','wipe','clear','help','exit','awk','sed','diff','ln','stat','file','strings','od','xxd','nl','rev','fold','paste','printf','which','type','alias','unalias','expr','bc','factor','printenv','set','unset','id','groups','hostname','arch','lsb_release','w','who','last','cal','nano','vi','vim','emacs','man','source','true','false'];
 
 function tabComplete(partial) {
   const parts=partial.split(' ');
@@ -1016,6 +1019,32 @@ const HELP=`
 │ passwd                       │ Change password (requires current pw)     │
 │ lixpy                        │ LixPy system info                        │
 │ lixpy storage wipe / wipe    │ Wipe ALL data + account (reloads page)    │
+├──────────────────────────────┼──────────────────────────────────────────┤
+│ TEXT PROCESSING              │                                          │
+│ awk '{print $N}' <file>      │ Extract fields from text                 │
+│ sed 's/old/new/g' <file>     │ Find and replace in file                 │
+│ nl / rev / fold / paste      │ Number lines / reverse / wrap / merge    │
+│ od / xxd <file>              │ Octal / hex dump                         │
+│ strings / file / stat        │ Inspect file contents and metadata       │
+│ diff <file1> <file2>         │ Compare two files                        │
+│ printf <text>                │ Print formatted text                     │
+├──────────────────────────────┼──────────────────────────────────────────┤
+│ SHELL UTILS                  │                                          │
+│ alias name='cmd'             │ Create command alias                     │
+│ unalias <name>               │ Remove alias                             │
+│ source <script>              │ Run commands from a VFS script file      │
+│ which / type <cmd>           │ Find command location                    │
+│ expr / bc <math>             │ Math expressions                         │
+│ factor <n>                   │ Prime factorization                      │
+│ id / groups / whoami         │ User identity                            │
+│ hostname / arch              │ System name / architecture               │
+│ lsb_release                  │ OS release info                          │
+│ w / who / last               │ Who is logged in                         │
+│ cal [month] [year]           │ Calendar                                 │
+│ set / printenv / unset       │ Environment variable management          │
+│ true / false / :             │ Exit status commands                     │
+│ man <cmd>                    │ Manual pages (links to man7.org)         │
+│ nano / vi / vim              │ Editor notice (use echo/cat instead)     │
 │ clear / help / exit          │ Terminal control                         │
 └──────────────────────────────┴──────────────────────────────────────────┘
  Tab=autocomplete  ↑↓=history  Ctrl+C=interrupt  Ctrl+D=exit engine
@@ -1623,7 +1652,439 @@ async function runCmd(com) {
     return;
   }
 
-  pe(`${base}: command not found  (type "help" for commands)`);
+
+  // ── awk ──────────────────────────────────────────────────────────────────
+  if (base==='awk') {
+    // Simple awk: awk '{print $N}' file  or  awk -F: '{print $N}' file
+    const fFlag = [...flags].find(f=>f.startsWith('-F'));
+    const delim = fFlag ? fFlag.slice(2)||':' : ' ';
+    const fname = args[args.length-1];
+    const prog = com.match(/'([^']+)'/)?.[1]||'';
+    const fieldMatch = prog.match(/\$([0-9]+)/g);
+    if (!fname||!prog){pe("Usage: awk '{print $N}' <file>");return;}
+    try {
+      vfsRead(fname).split('\n').filter(Boolean).forEach(line=>{
+        const fields = line.split(delim);
+        if (fieldMatch) {
+          print(fieldMatch.map(f=>fields[+f.slice(1)-1]||'').join('\t'));
+        } else { print(line); }
+      });
+    } catch(e){pe('awk: '+e.message);}
+    return;
+  }
+
+  // ── sed ──────────────────────────────────────────────────────────────────
+  if (base==='sed') {
+    // Simple sed: sed 's/foo/bar/g' file  or  sed 's/foo/bar/' file
+    const expr = com.match(/'([^']+)'/)?.[1]||'';
+    const fname = args[args.length-1];
+    if (!expr||!fname){pe('Usage: sed \'s/old/new/g\' <file>');return;}
+    const m = expr.match(/^s\/([^\/]*)\/([^\/]*)\/?(g?)$/);
+    if (!m){pe('sed: only s/old/new/g supported');return;}
+    try {
+      const text = vfsRead(fname);
+      const result = m[3]==='g'
+        ? text.split(m[1]).join(m[2])
+        : text.replace(m[1], m[2]);
+      print(result);
+    } catch(e){pe('sed: '+e.message);}
+    return;
+  }
+
+  // ── xargs ─────────────────────────────────────────────────────────────────
+  if (base==='xargs') {
+    if (!args.length){pe('Usage: xargs <command> < <file>');return;}
+    pe('xargs: pipe input not supported in browser — use file redirection');
+    pd('  Tip: use find + grep directly instead');
+    return;
+  }
+
+  // ── diff ──────────────────────────────────────────────────────────────────
+  if (base==='diff') {
+    if (args.length<2){pe('Usage: diff <file1> <file2>');return;}
+    try {
+      const a = vfsRead(args[0]).split('\n');
+      const b = vfsRead(args[1]).split('\n');
+      let diffs = 0;
+      const maxLen = Math.max(a.length, b.length);
+      for (let i=0;i<maxLen;i++) {
+        if (a[i]!==b[i]) {
+          if (a[i]!==undefined) print(`< ${a[i]}`,'err');
+          if (b[i]!==undefined) print(`> ${b[i]}`,'ok');
+          diffs++;
+        }
+      }
+      if (!diffs) pd('(files are identical)');
+    } catch(e){pe('diff: '+e.message);}
+    return;
+  }
+
+  // ── ln ────────────────────────────────────────────────────────────────────
+  if (base==='ln') {
+    if (args.length<2){pe('Usage: ln <src> <dst>');return;}
+    try {
+      // In VFS, symlinks = copies
+      vfsCopy(args[0],args[1]);
+      pd(`ln: created link '${args[1]}' → '${args[0]}' (copy in VFS)`);
+    } catch(e){pe('ln: '+e.message);}
+    return;
+  }
+
+  // ── stat ──────────────────────────────────────────────────────────────────
+  if (base==='stat') {
+    if (!args.length){pe('stat: missing operand');return;}
+    try {
+      const n = vfsNode(vfsAbs(args[0]));
+      if (!n){pe(`stat: cannot stat '${args[0]}': No such file`);return;}
+      pc(`  File: ${args[0]}`);
+      print(`  Type: ${n.type}`);
+      print(`  Size: ${n.type==='file'?n.content.length:'-'} bytes`);
+      print(`  Mode: ${(n.mode||0o644).toString(8)}`);
+      print(`  Modified: ${n.mtime?new Date(n.mtime).toLocaleString():'unknown'}`);
+    } catch(e){pe('stat: '+e.message);}
+    return;
+  }
+
+  // ── file ──────────────────────────────────────────────────────────────────
+  if (base==='file') {
+    if (!args.length){pe('file: missing operand');return;}
+    try {
+      const n = vfsNode(vfsAbs(args[0]));
+      if (!n){pe(`file: '${args[0]}': No such file`);return;}
+      if (n.type==='dir'){print(`${args[0]}: directory`);return;}
+      const c = n.content||'';
+      let type = 'ASCII text';
+      if (c.startsWith('data:image/png')) type = 'PNG image data (base64)';
+      else if (c.startsWith('data:image')) type = 'image data (base64)';
+      else if (c.startsWith('{')) type = 'JSON data';
+      else if (c.startsWith('<')) type = 'HTML/XML document';
+      else if (/[\x00-\x08\x0e-\x1f]/.test(c)) type = 'binary data';
+      print(`${args[0]}: ${type}`);
+    } catch(e){pe('file: '+e.message);}
+    return;
+  }
+
+  // ── strings ───────────────────────────────────────────────────────────────
+  if (base==='strings') {
+    if (!args.length){pe('strings: missing operand');return;}
+    try {
+      const text = vfsRead(args[0]);
+      const matches = text.match(/[\x20-\x7e]{4,}/g)||[];
+      matches.forEach(m=>print(m));
+      if (!matches.length) pd('(no printable strings found)');
+    } catch(e){pe('strings: '+e.message);}
+    return;
+  }
+
+  // ── od ────────────────────────────────────────────────────────────────────
+  if (base==='od') {
+    if (!args.length){pe('od: missing operand');return;}
+    try {
+      const text = vfsRead(args[0]);
+      for (let i=0;i<Math.min(text.length,256);i+=16) {
+        const chunk = text.slice(i,i+16);
+        const hex = Array.from(chunk).map(c=>c.charCodeAt(0).toString(16).padStart(2,'0')).join(' ');
+        const asc = Array.from(chunk).map(c=>c.charCodeAt(0)>=32&&c.charCodeAt(0)<127?c:'.').join('');
+        print(`${i.toString(8).padStart(7,'0')}  ${hex.padEnd(47)}  |${asc}|`,'cyan');
+      }
+      if (text.length>256) pd('...(truncated at 256 bytes)');
+    } catch(e){pe('od: '+e.message);}
+    return;
+  }
+
+  // ── xxd ───────────────────────────────────────────────────────────────────
+  if (base==='xxd') {
+    if (!args.length){pe('xxd: missing operand');return;}
+    try {
+      const text = vfsRead(args[0]);
+      for (let i=0;i<Math.min(text.length,256);i+=16) {
+        const chunk = text.slice(i,i+16);
+        const hex = Array.from(chunk).map(c=>c.charCodeAt(0).toString(16).padStart(2,'0')).join(' ');
+        const asc = Array.from(chunk).map(c=>c.charCodeAt(0)>=32&&c.charCodeAt(0)<127?c:'.').join('');
+        print(`${i.toString(16).padStart(8,'0')}: ${hex.padEnd(47)}  ${asc}`,'cyan');
+      }
+      if (text.length>256) pd('...(truncated at 256 bytes)');
+    } catch(e){pe('xxd: '+e.message);}
+    return;
+  }
+
+  // ── wc -l / -w / -c variants ─────────────────────────────────────────────
+  // (already handled by wc base, this catches wc -l etc)
+
+  // ── nl ────────────────────────────────────────────────────────────────────
+  if (base==='nl') {
+    if (!args.length){pe('nl: missing operand');return;}
+    try {
+      vfsRead(args[0]).split('\n').forEach((l,i)=>print(`${String(i+1).padStart(6)}\t${l}`));
+    } catch(e){pe('nl: '+e.message);}
+    return;
+  }
+
+  // ── rev ───────────────────────────────────────────────────────────────────
+  if (base==='rev') {
+    if (!args.length){pe('rev: missing operand');return;}
+    try {
+      vfsRead(args[0]).split('\n').forEach(l=>print(l.split('').reverse().join('')));
+    } catch(e){pe('rev: '+e.message);}
+    return;
+  }
+
+  // ── fold ──────────────────────────────────────────────────────────────────
+  if (base==='fold') {
+    const w = parseInt([...flags].find(f=>f.startsWith('-w'))?.[2]||'80');
+    if (!args.length){pe('fold: missing operand');return;}
+    try {
+      const text = vfsRead(args[0]);
+      for (let i=0;i<text.length;i+=w) print(text.slice(i,i+w));
+    } catch(e){pe('fold: '+e.message);}
+    return;
+  }
+
+  // ── paste ─────────────────────────────────────────────────────────────────
+  if (base==='paste') {
+    if (args.length<2){pe('paste: need at least 2 files');return;}
+    try {
+      const cols = args.map(f=>vfsRead(f).split('\n'));
+      const maxRows = Math.max(...cols.map(c=>c.length));
+      for (let i=0;i<maxRows;i++) print(cols.map(c=>c[i]||'').join('\t'));
+    } catch(e){pe('paste: '+e.message);}
+    return;
+  }
+
+  // ── join ──────────────────────────────────────────────────────────────────
+  if (base==='join') {
+    pe('join: not supported in this environment');
+    pd('  Use awk or cut to combine fields from files'); return;
+  }
+
+  // ── printf ────────────────────────────────────────────────────────────────
+  if (base==='printf') {
+    const rest = com.slice(7).trim().replace(/^['"]|['"]$/g,'');
+    print(rest.replace(/\\n/g,'\n').replace(/\\t/g,'\t'));
+    return;
+  }
+
+  // ── read ──────────────────────────────────────────────────────────────────
+  if (base==='read') {
+    pe('read: interactive input not supported outside scripts');
+    pd('  Use the terminal input directly'); return;
+  }
+
+  // ── source / . ────────────────────────────────────────────────────────────
+  if (base==='source' || com==='.') {
+    if (!args.length){pe('source: missing filename');return;}
+    try {
+      const script = vfsRead(args[0]);
+      const lines = script.split('\n').filter(l=>l.trim()&&!l.startsWith('#'));
+      print(`Running ${lines.length} commands from ${args[0]}…`,'info');
+      for (const line of lines) {
+        print(promptEl.textContent+line,'cmd');
+        await runCmd(line.trim());
+      }
+      pok(`Done running ${args[0]}`);
+    } catch(e){pe('source: '+e.message);}
+    return;
+  }
+
+  // ── which ─────────────────────────────────────────────────────────────────
+  if (base==='which') {
+    if (!args.length){pe('which: missing operand');return;}
+    if (ALL_CMDS.includes(args[0])) print(`/usr/bin/${args[0]}`);
+    else pe(`which: ${args[0]}: command not found`);
+    return;
+  }
+
+  // ── type ──────────────────────────────────────────────────────────────────
+  if (base==='type') {
+    if (!args.length){pe('type: missing operand');return;}
+    if (ALL_CMDS.includes(args[0])) print(`${args[0]} is /usr/bin/${args[0]}`);
+    else pe(`type: ${args[0]}: not found`);
+    return;
+  }
+
+  // ── alias ─────────────────────────────────────────────────────────────────
+  if (base==='alias') {
+    if (!args.length){
+      Object.entries(userAliases).forEach(([k,v])=>print(`alias ${k}='${v}'`));
+      if (!Object.keys(userAliases).length) pd('(no aliases defined)');
+    } else {
+      const rest = com.slice(6).trim();
+      const m = rest.match(/^([^=]+)='?([^']*)'?$/);
+      if (m) { userAliases[m[1].trim()]=m[2]; pok(`alias ${m[1].trim()} set`); }
+      else pe('alias: syntax: alias name=\'command\'');
+    }
+    return;
+  }
+
+  // ── unalias ───────────────────────────────────────────────────────────────
+  if (base==='unalias') {
+    if (!args.length){pe('unalias: missing operand');return;}
+    if (userAliases[args[0]]) { delete userAliases[args[0]]; pok(`unalias: ${args[0]} removed`); }
+    else pe(`unalias: ${args[0]}: not found`);
+    return;
+  }
+
+  // ── true / false ──────────────────────────────────────────────────────────
+  if (com==='true')  { return; } // exits 0, no output
+  if (com==='false') { pe('false'); return; }
+
+  // ── : (null command) ─────────────────────────────────────────────────────
+  if (com===':') { return; }
+
+  // ── expr ──────────────────────────────────────────────────────────────────
+  if (base==='expr') {
+    try {
+      const expr = args.join(' ').replace(/[^0-9+\-*/%()\s]/g,'');
+      if (!expr.trim()){pe('expr: syntax error');return;}
+      // eslint-disable-next-line no-eval
+      print(String(Function('"use strict";return ('+expr+')')()));
+    } catch(e){pe('expr: '+e.message);}
+    return;
+  }
+
+  // ── bc ────────────────────────────────────────────────────────────────────
+  if (base==='bc') {
+    if (!args.length){pe('bc: provide expression: bc "2+2"');return;}
+    try {
+      const expr = args.join(' ').replace(/[^0-9+\-*/.()\s]/g,'');
+      print(String(Function('"use strict";return ('+expr+')')()));
+    } catch(e){pe('bc: '+e.message);}
+    return;
+  }
+
+  // ── factor ────────────────────────────────────────────────────────────────
+  if (base==='factor') {
+    const n = parseInt(args[0]);
+    if (!n||n<2){pe('factor: provide a number >= 2');return;}
+    const factors=[];let x=n,d=2;
+    while(x>1){while(x%d===0){factors.push(d);x/=d;}d++;}
+    print(`${n}: ${factors.join(' ')}`);
+    return;
+  }
+
+  // ── printenv ─────────────────────────────────────────────────────────────
+  if (base==='printenv') {
+    if (args.length) { const v=envVars[args[0]]; v!==undefined?print(v):pe(`printenv: ${args[0]}: not set`); }
+    else Object.entries(envVars).sort().forEach(([k,v])=>print(`${k}=${v}`));
+    return;
+  }
+
+  // ── set ───────────────────────────────────────────────────────────────────
+  if (com==='set') {
+    Object.entries(envVars).sort().forEach(([k,v])=>print(`${k}=${v}`));
+    return;
+  }
+
+  // ── unset ─────────────────────────────────────────────────────────────────
+  if (base==='unset') {
+    if (!args.length){pe('unset: missing operand');return;}
+    delete envVars[args[0]];
+    return;
+  }
+
+  // ── id ────────────────────────────────────────────────────────────────────
+  if (com==='id') {
+    print(`uid=1000(${envVars.USER}) gid=1000(${envVars.USER}) groups=1000(${envVars.USER}),27(sudo)`);
+    return;
+  }
+
+  // ── groups ────────────────────────────────────────────────────────────────
+  if (com==='groups') { print(`${envVars.USER} sudo`); return; }
+
+  // ── hostname ──────────────────────────────────────────────────────────────
+  if (com==='hostname') { print('lixpy-terminal'); return; }
+
+  // ── arch ──────────────────────────────────────────────────────────────────
+  if (com==='arch') { print(navigator.platform||'x86_64'); return; }
+
+  // ── lsb_release ───────────────────────────────────────────────────────────
+  if (base==='lsb_release') {
+    pc('LSB Version: lixpy-2.0');
+    print('Distributor ID: LixPy');
+    print('Description: LixPy Browser Terminal 2.0');
+    print('Release: 2.0');
+    print('Codename: browser');
+    return;
+  }
+
+  // ── uname variants ───────────────────────────────────────────────────────
+  // already handled
+
+  // ── w / who / last ────────────────────────────────────────────────────────
+  if (com==='w'||com==='who') {
+    pc(`${envVars.USER}   tty1   ${new Date().toLocaleTimeString()}   0:00  lixpy-shell`);
+    return;
+  }
+  if (com==='last') { pd(`${envVars.USER}  tty1  ${new Date().toLocaleDateString()}  still logged in`); return; }
+
+  // ── cal ───────────────────────────────────────────────────────────────────
+  if (base==='cal') {
+    const now = new Date();
+    const year = args[1]?parseInt(args[1]):now.getFullYear();
+    const month = args[0]?parseInt(args[0])-1:now.getMonth();
+    const d = new Date(year,month,1);
+    const months=['January','February','March','April','May','June','July','August','September','October','November','December'];
+    pc(`    ${months[month]} ${year}`);
+    print('Su Mo Tu We Th Fr Sa');
+    let line = '   '.repeat(d.getDay());
+    const daysInMonth = new Date(year,month+1,0).getDate();
+    for (let i=1;i<=daysInMonth;i++) {
+      line += String(i).padStart(2)+' ';
+      if ((d.getDay()+i-1)%7===6) { print(line.trimEnd()); line=''; }
+    }
+    if (line.trim()) print(line.trimEnd());
+    return;
+  }
+
+  // ── bc style math shortcut ───────────────────────────────────────────────
+  if (/^[0-9].*[+\-*/%]/.test(com)) {
+    try {
+      const safe = com.replace(/[^0-9+\-*/.()\s]/g,'');
+      print(String(Function('"use strict";return ('+safe+')')()));
+    } catch(_){ }
+    return;
+  }
+
+  // ── nano / vi / vim / emacs ───────────────────────────────────────────────
+  if (['nano','vi','vim','emacs','micro'].includes(base)) {
+    const fname = args[0];
+    if (!fname){pe(`${base}: no filename given`);return;}
+    // Simple inline editor using prompt
+    const existing = vfsExists(vfsAbs(fname)) ? vfsRead(fname) : '';
+    pw(`${base}: full screen editors can't run in a browser.`);
+    pd(`  Current content of ${fname}:`);
+    if (existing) print(existing); else pd('  (empty file)');
+    pd(`  Use: echo "text" > ${fname}  to write`);
+    pd(`       cat ${fname}  to read`);
+    pd(`       download ${fname}  to open on your computer`);
+    return;
+  }
+
+  // ── man ───────────────────────────────────────────────────────────────────
+  if (base==='man') {
+    if (!args.length){pe('man: what manual page do you want?');return;}
+    pw(`man ${args[0]}: browser terminal has no man pages.`);
+    pd(`  Try: ${args[0]} --help  or  help`);
+    pd(`  Or visit: https://man7.org/linux/man-pages/`);
+    return;
+  }
+
+  // ── --help flag on any command ────────────────────────────────────────────
+  if (flags.has('--help')||flags.has('-h')) {
+    pd(`${base}: use "help" to see all LixPy commands`);
+    return;
+  }
+
+  // ── check user aliases ────────────────────────────────────────────────────
+  if (userAliases[base]) {
+    const expanded = userAliases[base] + (args.length?' '+args.join(' '):'');
+    print(promptEl.textContent+expanded,'dim');
+    await runCmd(expanded);
+    return;
+  }
+
+
+    pe(`${base}: command not found  (type "help" for commands)`);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
