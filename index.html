@@ -315,6 +315,7 @@ let lxBuffer = '';          // multi-line script accumulator
 let cmdHistory = [];
 let histIdx = -1;
 let envVars = {USER:'user',HOME:'/home',SHELL:'lixpy',TERM:'xterm-256color',PATH:'/usr/bin:/bin'};
+let currentUser = null;     // logged in user object
 let awaitingInput = null;   // {mode:'password'|'email'|'reset-code'|'new-password'}
 let pyodide = null;
 let pyodideReady = false;
@@ -463,9 +464,12 @@ sys.stdout = sys.stderr = _TW()
 window._lxPrint = t => plx(t);
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  AUTH — email required at signup (password reset only), not at login
+//  AUTH — username+password login, cross-device via Vercel KV
+//  Signup: username → email → email verify → password → confirm → done
+//  Login:  username → password (hashed client-side, sent to /api/login)
+//  Forgot: username → email → both must match → send reset code → verify → new pw
+//  passwd: current pw verify (email code) → new pw → confirm
 // ─────────────────────────────────────────────────────────────────────────────
-const AUTH_KEY = 'lixpy_auth_v1';
 
 async function hashPw(pw, saltHex) {
   const km = await crypto.subtle.importKey('raw', new TextEncoder().encode(pw), 'PBKDF2', false, ['deriveBits']);
@@ -476,261 +480,290 @@ function randomHex(n=32) { const a=new Uint8Array(n); crypto.getRandomValues(a);
 function bytesToHex(a) { return Array.from(a).map(b=>b.toString(16).padStart(2,'0')).join(''); }
 function hexToBytes(h) { const a=new Uint8Array(h.length/2); for(let i=0;i<a.length;i++) a[i]=parseInt(h.slice(i*2,i*2+2),16); return a; }
 
-function getAuth() {
-  try { return JSON.parse(localStorage.getItem(AUTH_KEY)||'null'); } catch(_) { return null; }
+async function apiPost(endpoint, body) {
+  const resp = await fetch(MAILER_URL + endpoint, {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(body),
+  });
+  const data = await resp.json();
+  return { ok: resp.ok, status: resp.status, data };
 }
-function saveAuth(obj) { localStorage.setItem(AUTH_KEY, JSON.stringify(obj)); }
 
 async function startAuth() {
-  const auth = getAuth();
-  if (!auth) {
-    // New user — need email + password
-    print('');
-    print('Welcome to LixPy.','out');
-    print('No account found. Let\'s create one.','warn');
-    print('Step 1/3 — Enter your email address (used only for password reset):','info');
-    inputEl.type = 'email';
-    awaitingInput = {mode:'email'};
-  } else {
-    print('');
-    print('Welcome back to LixPy.','out');
-    print('Enter password: (or type "forgot" to reset via email)','warn');
-    inputEl.type = 'password';
-    awaitingInput = {mode:'password'};
-  }
+  print('');
+  print('Welcome to LixPy.','out');
+  print('Enter your username (or type "new" to create an account):','info');
+  inputEl.type = 'text';
+  awaitingInput = {mode:'username'};
   updatePrompt();
 }
 
 async function handleInput(val) {
-  const auth = getAuth();
 
-  // ── email step (new account) ─────────────────────────────────────────────
-  if (awaitingInput.mode === 'email') {
+  // ── username entry ───────────────────────────────────────────────────────
+  if (awaitingInput.mode === 'username') {
+    if (val.trim().toLowerCase() === 'new') {
+      print('');
+      print('── Create Account ──────────────────────────','cyan');
+      print('Choose a username (3-20 chars, letters/numbers/_ -)','info');
+      inputEl.type = 'text';
+      awaitingInput = {mode:'signup-username'};
+      return;
+    }
+    const username = val.trim();
+    if (!username) { pe('Please enter a username.'); return; }
+    // Get salt from server
+    pw('Fetching account…');
+    const {ok, data} = await apiPost('/api/get-salt', {username});
+    awaitingInput = {mode:'login-password', username, salt: data.salt};
+    inputEl.type = 'password';
+    print('Password: (or type "forgot" to reset)','info');
+    return;
+  }
+
+  // ── login password ───────────────────────────────────────────────────────
+  if (awaitingInput.mode === 'login-password') {
+    if (val.trim().toLowerCase() === 'forgot') {
+      await startForgot(awaitingInput.username);
+      return;
+    }
+    const {username, salt} = awaitingInput;
+    const passwordHash = await hashPw(val, salt);
+    pw('Signing in…');
+    const {ok, data} = await apiPost('/api/login', {username, passwordHash});
+    if (ok && data.success) {
+      awaitingInput = null;
+      inputEl.type = 'text';
+      enterShell(data.user);
+    } else {
+      pe(data.error || 'Invalid username or password.');
+      print('Password: (or type "forgot")','info');
+      inputEl.type = 'password';
+    }
+    return;
+  }
+
+  // ── signup: username ─────────────────────────────────────────────────────
+  if (awaitingInput.mode === 'signup-username') {
+    const username = val.trim();
+    if (!/^[a-zA-Z0-9_-]{3,20}$/.test(username)) {
+      pe('Username must be 3-20 characters. Letters, numbers, _ and - only.');
+      return;
+    }
+    awaitingInput = {mode:'signup-email', username};
+    inputEl.type = 'email';
+    print('Enter your email (for password reset only):','info');
+    return;
+  }
+
+  // ── signup: email ────────────────────────────────────────────────────────
+  if (awaitingInput.mode === 'signup-email') {
     const email = val.trim().toLowerCase();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       pe('Invalid email address. Try again:');
       return;
     }
-    awaitingInput = {mode:'new-password', email};
+    // Send verification code
+    pw('Sending verification code to ' + email + '…');
+    const {ok, data} = await apiPost('/api/send-verify', {to_email: email, type:'verify'});
+    if (!ok) { pe(data.error || 'Failed to send code.'); return; }
+    pok('Code sent! Check your inbox (and spam folder).');
+    awaitingInput = {mode:'signup-email-verify', username: awaitingInput.username, email};
+    inputEl.type = 'text';
+    print('Enter the 6-digit code from your email:','info');
+    return;
+  }
+
+  // ── signup: verify email code ────────────────────────────────────────────
+  if (awaitingInput.mode === 'signup-email-verify') {
+    const {username, email} = awaitingInput;
+    pw('Verifying code…');
+    const {ok, data} = await apiPost('/api/verify-code', {email, code: val.trim(), type:'verify'});
+    if (!ok) { pe(data.error || 'Incorrect code.'); return; }
+    pok('Email verified!');
+    awaitingInput = {mode:'signup-password', username, email};
     inputEl.type = 'password';
-    print('Step 2/3 — Create a password:','info');
+    print('Create a password (min 6 characters):','info');
     return;
   }
 
-  // ── password creation step ────────────────────────────────────────────────
-  if (awaitingInput.mode === 'new-password') {
-    if (!val.trim()) { pe('Password cannot be empty.'); return; }
-    if (val.length < 6) { pe('Password must be at least 6 characters.'); return; }
-    awaitingInput = {mode:'confirm-password', email: awaitingInput.email, pw: val};
-    print('Step 3/3 — Confirm password:','info');
+  // ── signup: password ─────────────────────────────────────────────────────
+  if (awaitingInput.mode === 'signup-password') {
+    if (!val.trim() || val.length < 6) { pe('Password must be at least 6 characters.'); return; }
+    awaitingInput = {mode:'signup-confirm', username: awaitingInput.username, email: awaitingInput.email, pw: val};
+    print('Confirm password:','info');
     return;
   }
 
-  // ── confirm password ──────────────────────────────────────────────────────
-  if (awaitingInput.mode === 'confirm-password') {
+  // ── signup: confirm password ─────────────────────────────────────────────
+  if (awaitingInput.mode === 'signup-confirm') {
     if (val !== awaitingInput.pw) {
-      pe('Passwords do not match. Start again:');
-      inputEl.type = 'password';
-      awaitingInput = {mode:'new-password', email: awaitingInput.email};
-      print('Create a password:','info');
+      pe('Passwords do not match. Try again:');
+      awaitingInput.mode = 'signup-password';
+      awaitingInput.pw = undefined;
       return;
     }
+    const {username, email, pw: password} = awaitingInput;
     const salt = randomHex();
-    const hash = await hashPw(val, salt);
-    saveAuth({email: awaitingInput.email, salt, hash, createdAt: new Date().toISOString()});
+    const passwordHash = await hashPw(password, salt);
+    pw('Creating account…');
+    const {ok, data} = await apiPost('/api/register', {username, email, passwordHash, salt});
+    if (!ok) { pe(data.error || 'Registration failed.'); return; }
+    pok('Account created! Welcome, ' + username + '!');
     awaitingInput = null;
     inputEl.type = 'text';
-    pok('Account created!');
-    enterShell();
+    // Auto login
+    const loginRes = await apiPost('/api/login', {username, passwordHash});
+    enterShell(loginRes.data.user || {username, email});
     return;
   }
 
-  // ── login ────────────────────────────────────────────────────────────────
-  if (awaitingInput.mode === 'password') {
-    if (val.trim().toLowerCase() === 'forgot') {
-      await doForgotPassword();
-      return;
-    }
-    const {salt, hash} = auth;
-    if (await hashPw(val, salt) === hash) {
-      awaitingInput = null;
-      inputEl.type = 'text';
-      enterShell();
-    } else {
-      pe('Incorrect password. Try again (or type "forgot"):');
-    }
+  // ── forgot: enter username ───────────────────────────────────────────────
+  if (awaitingInput.mode === 'forgot-username') {
+    awaitingInput = {mode:'forgot-email', username: val.trim()};
+    inputEl.type = 'email';
+    print('Enter the email address on your account:','info');
     return;
   }
 
-  // ── passwd: verify current password ─────────────────────────────────────
-  if (awaitingInput.mode === 'passwd-verify') {
-    const auth = getAuth();
-    if (!auth) { pe('No account found.'); awaitingInput=null; inputEl.type='text'; return; }
-    const attempt = await hashPw(val, auth.salt);
-    if (attempt !== auth.hash) {
-      pe('Incorrect password. passwd cancelled.');
-      awaitingInput=null; inputEl.type='text';
-      return;
-    }
-    awaitingInput={mode:'passwd-new', email:auth.email};
-    inputEl.type='password';
-    print('Verified. Enter new password:','ok');
+  // ── forgot: enter email ──────────────────────────────────────────────────
+  if (awaitingInput.mode === 'forgot-email') {
+    const email = val.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { pe('Invalid email.'); return; }
+    pw('Sending reset code…');
+    // Server checks username+email match silently
+    const {ok, data} = await apiPost('/api/send-verify', {
+      to_email: email, username: awaitingInput.username, type:'reset'
+    });
+    // Always say sent (don't reveal if match or not)
+    pok('If that username and email match, a code has been sent.');
+    pd('Check your inbox and spam folder.');
+    awaitingInput = {mode:'forgot-code', username: awaitingInput.username, email};
+    inputEl.type = 'text';
+    print('Enter the 6-digit code:','info');
     return;
   }
-  if (awaitingInput.mode === 'passwd-new') {
-    if (!val.trim()||val.length<6){pe('Password must be at least 6 characters.');return;}
-    awaitingInput={mode:'passwd-confirm', email:awaitingInput.email, _pw:val};
+
+  // ── forgot: verify reset code ────────────────────────────────────────────
+  if (awaitingInput.mode === 'forgot-code') {
+    const {username, email} = awaitingInput;
+    pw('Verifying code…');
+    const {ok, data} = await apiPost('/api/verify-code', {email, code: val.trim(), type:'reset'});
+    if (!ok) { pe(data.error || 'Incorrect code.'); return; }
+    // Mark reset as verified on server
+    await apiPost('/api/mark-reset-verified', {email});
+    pok('Code verified!');
+    awaitingInput = {mode:'forgot-new-pw', username, email};
+    inputEl.type = 'password';
+    print('Enter new password (min 6 characters):','info');
+    return;
+  }
+
+  // ── forgot: new password ─────────────────────────────────────────────────
+  if (awaitingInput.mode === 'forgot-new-pw') {
+    if (!val.trim() || val.length < 6) { pe('Password must be at least 6 characters.'); return; }
+    awaitingInput = {mode:'forgot-confirm-pw', username: awaitingInput.username, email: awaitingInput.email, pw: val};
     print('Confirm new password:','info');
     return;
   }
+
+  // ── forgot: confirm new password ─────────────────────────────────────────
+  if (awaitingInput.mode === 'forgot-confirm-pw') {
+    if (val !== awaitingInput.pw) { pe('Passwords do not match. Try again:'); awaitingInput.mode='forgot-new-pw'; awaitingInput.pw=undefined; return; }
+    const {username, email, pw: password} = awaitingInput;
+    const salt = randomHex();
+    const newPasswordHash = await hashPw(password, salt);
+    pw('Updating password…');
+    const {ok, data} = await apiPost('/api/change-password', {username, newPasswordHash, newSalt: salt, email});
+    if (!ok) { pe(data.error || 'Failed to change password.'); return; }
+    pok('Password changed! You can now log in.');
+    awaitingInput = {mode:'username'};
+    inputEl.type = 'text';
+    print('Enter your username:','info');
+    return;
+  }
+
+  // ── passwd: verify via email code ────────────────────────────────────────
+  if (awaitingInput.mode === 'passwd-verify') {
+    // currentPasswordHash verify
+    const auth = awaitingInput;
+    const attempt = await hashPw(val, auth.salt);
+    pw('Verifying…');
+    const {ok, data} = await apiPost('/api/login', {username: auth.username, passwordHash: attempt});
+    if (!ok) { pe('Incorrect password. passwd cancelled.'); awaitingInput=null; inputEl.type='text'; return; }
+    // Send email code for extra security
+    pw('Sending verification code to your email…');
+    const sendRes = await apiPost('/api/send-verify', {to_email: auth.email, type:'reset'});
+    if (!sendRes.ok) { pe(sendRes.data.error || 'Failed to send code.'); awaitingInput=null; inputEl.type='text'; return; }
+    pok('Verification code sent to ' + auth.email);
+    awaitingInput = {mode:'passwd-email-code', username: auth.username, email: auth.email};
+    inputEl.type = 'text';
+    print('Enter the 6-digit code from your email:','info');
+    return;
+  }
+
+  // ── passwd: email code verify ────────────────────────────────────────────
+  if (awaitingInput.mode === 'passwd-email-code') {
+    const {username, email} = awaitingInput;
+    const {ok, data} = await apiPost('/api/verify-code', {email, code: val.trim(), type:'reset'});
+    if (!ok) { pe(data.error || 'Incorrect code.'); return; }
+    await apiPost('/api/mark-reset-verified', {email});
+    pok('Verified!');
+    awaitingInput = {mode:'passwd-new', username, email};
+    inputEl.type = 'password';
+    print('Enter new password:','info');
+    return;
+  }
+
+  // ── passwd: new password ─────────────────────────────────────────────────
+  if (awaitingInput.mode === 'passwd-new') {
+    if (!val.trim()||val.length<6){pe('Password must be at least 6 characters.');return;}
+    awaitingInput={mode:'passwd-confirm', username:awaitingInput.username, email:awaitingInput.email, _pw:val};
+    print('Confirm new password:','info');
+    return;
+  }
+
+  // ── passwd: confirm ──────────────────────────────────────────────────────
   if (awaitingInput.mode === 'passwd-confirm') {
-    if (val !== awaitingInput._pw){pe('Passwords do not match. Try again:'); awaitingInput.mode='passwd-new'; awaitingInput._pw=undefined; return;}
-    const salt=randomHex(); const hash=await hashPw(val,salt);
-    const existing=getAuth();
-    saveAuth({...existing,salt,hash});
+    if (val !== awaitingInput._pw){pe('Passwords do not match.'); awaitingInput.mode='passwd-new'; awaitingInput._pw=undefined; return;}
+    const {username, email} = awaitingInput;
+    const salt = randomHex();
+    const newPasswordHash = await hashPw(awaitingInput._pw, salt);
+    pw('Updating password…');
+    const {ok, data} = await apiPost('/api/change-password', {username, newPasswordHash, newSalt:salt, email});
+    if (!ok) { pe(data.error || 'Failed.'); awaitingInput=null; inputEl.type='text'; return; }
     awaitingInput=null; inputEl.type='text';
     pok('Password changed successfully!');
     return;
   }
 
-  // ── password reset: code entry ────────────────────────────────────────────
-  if (awaitingInput.mode === 'reset-code') {
-    // Check expiry first
-    if (pendingResetExpiry && Date.now() > pendingResetExpiry) {
-      pe('Code expired (10 minute limit). Type "forgot" at login to request a new one.');
-      pendingResetCode = null; pendingResetExpiry = null;
-      awaitingInput = {mode:'password'}; inputEl.type='password';
-      print('Enter password:','warn');
-      return;
-    }
-    if (val.trim() === pendingResetCode) {
-      awaitingInput = {mode:'reset-new-password'};
-      inputEl.type = 'password';
-      pendingResetCode = null; pendingResetExpiry = null;
-      print('✓ Code accepted! Enter your new password:','ok');
-    } else {
-      pe('Incorrect code. Check your email and try again:');
-    }
-    return;
-  }
-
-  // ── password reset: new password ──────────────────────────────────────────
-  if (awaitingInput.mode === 'reset-new-password') {
-    if (!val.trim() || val.length < 6) { pe('Password must be at least 6 characters.'); return; }
-    awaitingInput = {mode:'reset-confirm'};
-    awaitingInput._pw = val;
-    print('Confirm new password:','info');
-    return;
-  }
-  if (awaitingInput.mode === 'reset-confirm') {
-    if (val !== awaitingInput._pw) { pe('Passwords do not match. Enter new password again:'); awaitingInput.mode='reset-new-password'; return; }
-    const salt = randomHex();
-    const hash = await hashPw(val, salt);
-    const existing = getAuth();
-    saveAuth({...existing, salt, hash});
-    awaitingInput = null;
-    inputEl.type = 'text';
-    pok('Password changed successfully!');
-    print('Enter your new password to log in:','warn');
-    inputEl.type = 'password';
-    awaitingInput = {mode:'password'};
-    return;
-  }
 }
 
-async function doForgotPassword() {
-  const auth = getAuth();
-  if (!auth || !auth.email) {
-    pe('No email on file. Cannot send reset code.');
-    return;
-  }
-
-  // Check Vercel URL is configured
-  if (!MAILER_URL || MAILER_URL === 'PASTE_YOUR_VERCEL_URL_HERE') {
-    pe('Mailer not configured yet.');
-    pd('  Deploy lixpy-mailer to Vercel and paste the URL into lixpy.html.');
-    pd('  See the setup instructions that came with your files.');
-    pd('  Until then, use "wipe" to reset your account and create a new one.');
-    return;
-  }
-
-  // Generate 6-digit code with 10-minute expiry
-  const code = String(Math.floor(100000 + Math.random() * 900000));
-  pendingResetCode = code;
-  pendingResetExpiry = Date.now() + 10 * 60 * 1000;  // 10 minutes
-
-  pw('Sending reset code to ' + auth.email + '…');
-  pd('  This may take a few seconds…');
-
-  try {
-    const resp = await fetch(MAILER_URL + '/api/send-reset', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        to_email:   auth.email,
-        to_name:    auth.email.split('@')[0],
-        reset_code: code,
-      }),
-    });
-
-    const data = await resp.json();
-
-    if (resp.status === 429) {
-      pe('Please wait 60 seconds before requesting another code.');
-      pendingResetCode = null; pendingResetExpiry = null;
-      return;
-    }
-
-    if (!resp.ok) {
-      throw new Error(data.error || 'Server error ' + resp.status);
-    }
-
-    pok('✓ Code sent to ' + auth.email);
-    pd('  Check your inbox (and spam folder).');
-    pd('  Code expires in 10 minutes.');
-    print('');
-    print('Enter the 6-digit code from your email:','info');
-    inputEl.type = 'text';
-    awaitingInput = {mode:'reset-code'};
-
-  } catch(e) {
-    pe('Failed to send email: ' + e.message);
-    pd('  Make sure your Vercel deployment is live and GMAIL_USER / GMAIL_APP_PASSWORD are set in Vercel.');
-    pendingResetCode = null; pendingResetExpiry = null;
-  }
-}
-
-function enterShell() {
-  loggedIn = true;
-  const auth = getAuth();
-  envVars.USER = (auth?.email?.split('@')[0] || 'user').replace(/[^a-z0-9_-]/gi,'').slice(0,16) || 'user';
+async function startForgot(username) {
+  awaitingInput = {mode:'forgot-username'};
   print('');
-  print('LixPy  —  by Ozzie E.','out');
-  pd('Type "help" for commands.  "lx run" for scripting engine.  "lixpy" for system info.');
+  print('── Password Reset ──────────────────────────','cyan');
+  if (username) {
+    // Pre-fill username from login screen
+    awaitingInput = {mode:'forgot-email', username};
+    inputEl.type = 'email';
+    print('Enter the email address on account "' + username + '":','info');
+  } else {
+    inputEl.type = 'text';
+    print('Enter your username:','info');
+  }
+}
+
+function enterShell(user) {
+  loggedIn = true;
+  currentUser = user;
+  envVars.USER = user.username || 'user';
+  print('');
+  pok('Logged in as ' + (user.username || 'user'));
+  pd('Type "help" for commands. "lx run" for scripting engine.');
   print('');
   updatePrompt();
-}
-
-function updatePrompt() {
-  if (!awaitingInput && !loggedIn) {
-    promptEl.textContent = '$ ';
-    promptEl.style.color = 'var(--dim)';
-    return;
-  }
-  if (awaitingInput) {
-    const icons = {email:'📧 ',password:'🔒 ','new-password':'🔑 ','confirm-password':'🔑 ',
-                   'reset-code':'📨 ','reset-new-password':'🔑 ','reset-confirm':'🔑 '};
-    promptEl.textContent = icons[awaitingInput.mode] || '? ';
-    promptEl.style.color = 'var(--yellow)';
-    return;
-  }
-  if (inLxMode) {
-    promptEl.textContent = lxBuffer.trim() ? '... ' : '>>> ';
-    promptEl.style.color = 'var(--yellow)';
-    return;
-  }
-  promptEl.textContent = `${envVars.USER}@lixpy:${cwd} $ `;
-  promptEl.style.color = 'var(--green2)';
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1084,10 +1117,12 @@ async function runCmd(com) {
     pd('(Refresh to log back in.)'); return;
   }
   if (com==='passwd') {
-    // Require current password before allowing change
+    if (!currentUser) { pe('Not logged in.'); return; }
     pw('Enter CURRENT password to verify:');
     inputEl.type='password';
-    awaitingInput={mode:'passwd-verify', email:getAuth()?.email};
+    // Need to get salt first
+    const saltRes = await apiPost('/api/get-salt', {username: currentUser.username});
+    awaitingInput={mode:'passwd-verify', username:currentUser.username, email:currentUser.email, salt:saltRes.data.salt};
     return;
   }
   if (com==='perms') {
@@ -1105,12 +1140,12 @@ async function runCmd(com) {
     pc('──── LixPy System ────');
     print(`  Version:   LixPy 2.0`);
     print(`  Engine:    WASM (${pyodideReady?'ready — v'+pyodide.version:'offline'})`,'py');
-    print(`  Auth:      ${getAuth()?.email||'unknown'}`,'dim');
+    print(`  User:      ${currentUser?.username||'unknown'}`,'dim');
     print(`  VFS size:  ${vfsDirSize('/').toLocaleString()} bytes`);
     print(`  Uptime:    ${Math.round((Date.now()-BOOT_TIME)/1000)}s`);
     return;
   }
-  if (com==='lixpy storage wipe' || com==='wipe') {
+  if (com==='lixpy storage wipe' || com==='wipe') { currentUser=null; loggedIn=false;
     // Wipe ALL lixpy data including account, ToS, and sentinel
     const keys = Object.keys(localStorage).filter(k=>k.startsWith('lixpy_'));
     keys.push(WIPE_SENTINEL);
