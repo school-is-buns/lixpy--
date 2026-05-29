@@ -78,6 +78,19 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
 .cbtn{background:var(--panel);border:1px solid var(--green);color:var(--green);font-family:var(--font);font-size:13px;padding:6px 16px;cursor:pointer;border-radius:2px}
 .cbtn:hover{background:var(--green);color:var(--bg)}
 
+/* ── nano editor ── */
+#editor-overlay{display:none;position:fixed;inset:0;background:var(--bg);z-index:900;flex-direction:column;font-family:var(--font);font-size:14px}
+#editor-overlay.active{display:flex}
+#editor-titlebar{background:#00ff88;color:#070d07;padding:3px 10px;font-weight:bold;display:flex;justify-content:space-between;flex-shrink:0}
+#editor-body{flex:1;overflow-y:auto;padding:8px;white-space:pre-wrap;word-break:break-word;cursor:text}
+#editor-statusbar{background:#00ff88;color:#070d07;padding:3px 10px;flex-shrink:0;font-size:12px;display:flex;justify-content:space-between}
+#editor-input-row{display:flex;align-items:center;background:var(--bg2);padding:4px 8px;border-top:1px solid var(--border);flex-shrink:0}
+#editor-prompt{color:var(--green2);white-space:nowrap;margin-right:6px}
+#editor-input{flex:1;background:transparent;border:none;outline:none;color:var(--white);font-family:var(--font);font-size:14px;caret-color:var(--green)}
+.editor-line{display:block;min-height:1.4em;padding:0 2px}
+.editor-line.active-line{background:rgba(0,255,136,0.08);border-left:2px solid var(--green)}
+.editor-line-num{color:var(--dim);user-select:none;margin-right:8px;min-width:3ch;display:inline-block;text-align:right}
+
 /* ── mic overlay ── */
 #mic-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.9);z-index:1001;flex-direction:column;align-items:center;justify-content:center;gap:14px}
 #mic-overlay.active{display:flex}
@@ -158,6 +171,23 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
     <button class="cbtn" id="cam-close">✕ Stop Camera</button>
   </div>
   <div class="overlay-hint">Snap saves to in-browser VFS only. Download also saves to your computer. Both are local — nothing uploaded.</div>
+</div>
+
+<!-- ── Nano/Vi Editor ── -->
+<div id="editor-overlay">
+  <div id="editor-titlebar">
+    <span id="editor-title">GNU nano — untitled</span>
+    <span>Ctrl+S=Save  Ctrl+X=Exit  Ctrl+G=Help</span>
+  </div>
+  <div id="editor-body" id="editor-body"></div>
+  <div id="editor-statusbar">
+    <span id="editor-status">Line 1/1  Col 1</span>
+    <span id="editor-modified"></span>
+  </div>
+  <div id="editor-input-row">
+    <span id="editor-prompt">▶ </span>
+    <input id="editor-input" type="text" autocomplete="off" spellcheck="false" placeholder="type line content, Enter to add/replace…">
+  </div>
 </div>
 
 <!-- ── Mic overlay ── -->
@@ -433,6 +463,12 @@ const sc = {
 
 // User-defined aliases
 let userAliases = {};
+
+// ── Nano/vi editor state ──────────────────────────────────────────────────────
+let inEditorMode = false;
+let editorLines = [];
+let editorFile = '';
+let editorCursor = 0; // current line index
 
 // Fake processes
 const PROCS = [
@@ -1056,6 +1092,7 @@ inputEl.addEventListener('keydown', async e => {
       await runLxLine(val);
       return;
     }
+    if (inEditorMode) return; // editor handles its own input
     if (!val.trim()) return;
     print(promptEl.textContent+val,'cmd');
     cmdHistory.push(val);
@@ -2180,18 +2217,13 @@ async function runCmd(com) {
     return;
   }
 
-  // ── nano / vi / vim / emacs ───────────────────────────────────────────────
+  // ── nano / vi / vim / emacs / micro ─────────────────────────────────────
   if (['nano','vi','vim','emacs','micro'].includes(base)) {
     const fname = args[0];
-    if (!fname){pe(`${base}: no filename given`);return;}
-    // Simple inline editor using prompt
-    const existing = vfsExists(vfsAbs(fname)) ? vfsRead(fname) : '';
-    pw(`${base}: full screen editors can't run in a browser.`);
-    pd(`  Current content of ${fname}:`);
-    if (existing) print(existing); else pd('  (empty file)');
-    pd(`  Use: echo "text" > ${fname}  to write`);
-    pd(`       cat ${fname}  to read`);
-    pd(`       download ${fname}  to open on your computer`);
+    if (!fname) { pe(`${base}: no filename given. Usage: ${base} <filename>`); return; }
+    // Create file if it doesn't exist
+    if (!vfsExists(vfsAbs(fname))) { vfsWrite(fname, ''); }
+    openEditor(fname, base);
     return;
   }
 
@@ -2261,6 +2293,233 @@ async function runCmd(com) {
 
     pe(`${base}: command not found  (type "help" for commands)`);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  NANO / VI EDITOR — real in-terminal text editor
+// ─────────────────────────────────────────────────────────────────────────────
+
+const editorOverlay  = document.getElementById('editor-overlay');
+const editorBody     = document.getElementById('editor-body');
+const editorTitle    = document.getElementById('editor-title');
+const editorStatus   = document.getElementById('editor-status');
+const editorModified = document.getElementById('editor-modified');
+const editorInput    = document.getElementById('editor-input');
+const editorPromptEl = document.getElementById('editor-prompt');
+
+let editorDirty = false;
+let editorMode = 'edit'; // 'edit' | 'command' (for vi)
+let editorIsVi = false;
+
+function openEditor(fname, editorName='nano') {
+  editorFile = fname || 'untitled';
+  editorIsVi = editorName === 'vi' || editorName === 'vim';
+
+  // Load existing file or start empty
+  try {
+    const content = vfsRead(editorFile);
+    editorLines = content.split('\n');
+    // Remove trailing empty line from split
+    if (editorLines[editorLines.length-1] === '') editorLines.pop();
+  } catch(_) {
+    editorLines = [''];
+  }
+  if (!editorLines.length) editorLines = [''];
+
+  editorCursor = 0;
+  editorDirty = false;
+  inEditorMode = true;
+
+  editorTitle.textContent = `${editorName} — ${editorFile}`;
+  editorOverlay.classList.add('active');
+  editorModified.textContent = '';
+  editorMode = editorIsVi ? 'command' : 'edit';
+  editorPromptEl.textContent = editorIsVi ? '(command) :' : '▶ ';
+
+  renderEditor();
+  editorInput.value = editorIsVi ? '' : editorLines[editorCursor] || '';
+  editorInput.focus();
+  updateEditorStatus();
+}
+
+function renderEditor() {
+  editorBody.innerHTML = '';
+  editorLines.forEach((line, i) => {
+    const span = document.createElement('span');
+    span.className = 'editor-line' + (i === editorCursor ? ' active-line' : '');
+    const num = document.createElement('span');
+    num.className = 'editor-line-num';
+    num.textContent = String(i+1).padStart(3);
+    span.appendChild(num);
+    span.appendChild(document.createTextNode(line));
+    span.addEventListener('click', () => {
+      editorCursor = i;
+      editorInput.value = editorLines[i];
+      editorInput.focus();
+      renderEditor();
+      updateEditorStatus();
+    });
+    editorBody.appendChild(span);
+  });
+  // Scroll active line into view
+  const activeLine = editorBody.querySelector('.active-line');
+  if (activeLine) activeLine.scrollIntoView({block:'nearest'});
+}
+
+function updateEditorStatus() {
+  editorStatus.textContent = `Line ${editorCursor+1}/${editorLines.length}  Col ${(editorLines[editorCursor]||'').length+1}`;
+  editorModified.textContent = editorDirty ? '* Modified *' : '';
+}
+
+function saveEditor() {
+  const content = editorLines.join('\n') + '\n';
+  vfsWrite(editorFile, content);
+  editorDirty = false;
+  editorModified.textContent = '[ Saved ]';
+  setTimeout(() => { editorModified.textContent = ''; }, 1500);
+}
+
+function closeEditor(save=false) {
+  if (save) saveEditor();
+  inEditorMode = false;
+  editorOverlay.classList.remove('active');
+  editorInput.value = '';
+  inputEl.focus();
+  if (save || !editorDirty) {
+    pok(`${editorIsVi?'vi':'nano'}: saved "${editorFile}" (${editorLines.length} lines)`);
+  } else {
+    pd(`${editorIsVi?'vi':'nano'}: closed without saving "${editorFile}"`);
+  }
+  updatePrompt();
+}
+
+// Editor keyboard handler
+editorInput.addEventListener('keydown', async e => {
+  if (!inEditorMode) return;
+
+  // ── Vi command mode ─────────────────────────────────────────────────────
+  if (editorIsVi && editorMode === 'command') {
+    const val = editorInput.value.trim();
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (val === ':w' || val === ':write') { saveEditor(); editorInput.value = ''; }
+      else if (val === ':q' || val === ':quit') {
+        if (editorDirty) { editorModified.textContent = 'Unsaved changes! Use :q! to force quit or :wq to save'; }
+        else { closeEditor(false); }
+        editorInput.value = '';
+      }
+      else if (val === ':wq' || val === ':x') { closeEditor(true); editorInput.value = ''; }
+      else if (val === ':q!') { editorDirty=false; closeEditor(false); editorInput.value = ''; }
+      else if (val === 'i' || val === 'a' || val === 'o') {
+        editorMode = 'insert';
+        editorPromptEl.textContent = '(insert) ▶ ';
+        editorInput.value = editorLines[editorCursor] || '';
+        editorInput.focus();
+      }
+      else if (val === 'dd') {
+        editorLines.splice(editorCursor, 1);
+        if (!editorLines.length) editorLines = [''];
+        editorCursor = Math.min(editorCursor, editorLines.length-1);
+        editorDirty = true;
+        renderEditor();
+        updateEditorStatus();
+        editorInput.value = '';
+      }
+      else if (val === 'G') {
+        editorCursor = editorLines.length-1;
+        renderEditor(); updateEditorStatus(); editorInput.value='';
+      }
+      else if (val === 'gg') {
+        editorCursor = 0;
+        renderEditor(); updateEditorStatus(); editorInput.value='';
+      }
+      else if (/^\d+$/.test(val)) {
+        editorCursor = Math.min(parseInt(val)-1, editorLines.length-1);
+        renderEditor(); updateEditorStatus(); editorInput.value='';
+      }
+      return;
+    }
+    if (e.key === 'Escape') { editorInput.value=''; return; }
+    if (e.key === 'ArrowUp')   { e.preventDefault(); if(editorCursor>0){editorCursor--;renderEditor();updateEditorStatus();} return; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); if(editorCursor<editorLines.length-1){editorCursor++;renderEditor();updateEditorStatus();} return; }
+    return;
+  }
+
+  // ── Insert/Edit mode ────────────────────────────────────────────────────
+  if (e.key === 'Escape' && editorIsVi) {
+    // Switch back to command mode
+    editorLines[editorCursor] = editorInput.value;
+    editorMode = 'command';
+    editorPromptEl.textContent = '(command) :';
+    editorInput.value = '';
+    editorDirty = true;
+    renderEditor(); updateEditorStatus();
+    return;
+  }
+
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    const val = editorInput.value;
+    editorLines[editorCursor] = val;
+    editorDirty = true;
+    // Insert new line after cursor
+    editorLines.splice(editorCursor+1, 0, '');
+    editorCursor++;
+    renderEditor();
+    editorInput.value = '';
+    updateEditorStatus();
+    return;
+  }
+
+  if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    editorLines[editorCursor] = editorInput.value;
+    if (editorCursor > 0) { editorCursor--; editorInput.value = editorLines[editorCursor]; }
+    renderEditor(); updateEditorStatus(); return;
+  }
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    editorLines[editorCursor] = editorInput.value;
+    if (editorCursor < editorLines.length-1) { editorCursor++; editorInput.value = editorLines[editorCursor]; }
+    renderEditor(); updateEditorStatus(); return;
+  }
+
+  // Ctrl+S = save
+  if (e.key === 's' && e.ctrlKey) {
+    e.preventDefault();
+    editorLines[editorCursor] = editorInput.value;
+    saveEditor(); return;
+  }
+  // Ctrl+X = exit (save if dirty)
+  if (e.key === 'x' && e.ctrlKey) {
+    e.preventDefault();
+    editorLines[editorCursor] = editorInput.value;
+    closeEditor(editorDirty); return;
+  }
+  // Ctrl+K = delete line
+  if (e.key === 'k' && e.ctrlKey) {
+    e.preventDefault();
+    editorLines.splice(editorCursor, 1);
+    if (!editorLines.length) editorLines=[''];
+    editorCursor = Math.min(editorCursor, editorLines.length-1);
+    editorInput.value = editorLines[editorCursor];
+    editorDirty = true;
+    renderEditor(); updateEditorStatus(); return;
+  }
+  // Ctrl+G = help
+  if (e.key === 'g' && e.ctrlKey) {
+    e.preventDefault();
+    editorModified.textContent = 'Enter=new line  ↑↓=move  Ctrl+S=save  Ctrl+X=exit  Ctrl+K=del line  Click line to edit';
+    setTimeout(()=>{ editorModified.textContent = editorDirty?'* Modified *':''; }, 4000);
+    return;
+  }
+
+  // Track typing as modification
+  editorDirty = true;
+  updateEditorStatus();
+});
+
+// Click on editor body focuses input
+editorBody.addEventListener('click', () => editorInput.focus());
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  BOOT
