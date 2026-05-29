@@ -258,7 +258,12 @@ function vfsWrite(path, content, append=false) {
   if (!parent) throw new Error('No such directory');
   if (parent.children[name]?.type === 'dir') throw new Error('Is a directory');
   const prev = append && parent.children[name] ? parent.children[name].content : '';
-  parent.children[name] = {type:'file',content:prev+content,mtime:new Date(),mode:0o644};
+  const finalContent = prev + content;
+  parent.children[name] = {type:'file',content:finalContent,mtime:new Date(),mode:0o644};
+  // Auto-sync to cloud (non-blocking)
+  if (cloudSyncEnabled && abs.startsWith('/home')) {
+    cloudSave(abs, finalContent).catch(()=>{});
+  }
 }
 function vfsRead(path) {
   const n = vfsNode(vfsAbs(path));
@@ -275,10 +280,19 @@ function vfsList(path) {
 function vfsExists(p)  { return vfsNode(vfsAbs(p)) !== null; }
 function vfsIsDir(p)   { const n=vfsNode(vfsAbs(p)); return n&&n.type==='dir'; }
 function vfsRemove(path, recursive=false) {
-  const {parent,name} = vfsParent(vfsAbs(path));
+  const abs = vfsAbs(path);
+  const {parent,name} = vfsParent(abs);
   if (!parent||!parent.children[name]) throw new Error(`No such file: ${path}`);
   if (parent.children[name].type==='dir' && !recursive) throw new Error(`Is a directory (use rm -r): ${path}`);
+  // Collect paths to delete from cloud before removing locally
+  const toDelete = parent.children[name].type==='dir'
+    ? vfsWalk(abs).filter(e=>e.type==='file').map(e=>e.path)
+    : [abs];
   delete parent.children[name];
+  // Sync deletions to cloud (non-blocking)
+  if (cloudSyncEnabled) {
+    toDelete.forEach(p => cloudDelete(p).catch(()=>{}));
+  }
 }
 function vfsCopy(src,dst) {
   const sn = vfsNode(vfsAbs(src));
@@ -316,6 +330,85 @@ let cmdHistory = [];
 let histIdx = -1;
 let envVars = {USER:'user',HOME:'/home',SHELL:'lixpy',TERM:'xterm-256color',PATH:'/usr/bin:/bin'};
 let currentUser = null;     // logged in user object
+let cloudSyncEnabled = false; // true once logged in with valid token
+let authToken = null;         // passwordHash used as auth token for file API
+
+// ── Cloud file sync helpers ───────────────────────────────────────────────────
+async function cloudSave(path, content) {
+  if (!cloudSyncEnabled || !authToken || !currentUser) return false;
+  try {
+    const {ok, data} = await apiPost('/api/files', {
+      action:'save', username:currentUser.username, token:authToken, path, content
+    });
+    return ok && data.success;
+  } catch(_) { return false; }
+}
+
+async function cloudRead(path) {
+  if (!cloudSyncEnabled || !authToken || !currentUser) return null;
+  try {
+    const {ok, data} = await apiPost('/api/files', {
+      action:'read', username:currentUser.username, token:authToken, path
+    });
+    return ok && data.success ? data.content : null;
+  } catch(_) { return null; }
+}
+
+async function cloudDelete(path) {
+  if (!cloudSyncEnabled || !authToken || !currentUser) return false;
+  try {
+    const {ok} = await apiPost('/api/files', {
+      action:'delete', username:currentUser.username, token:authToken, path
+    });
+    return ok;
+  } catch(_) { return false; }
+}
+
+async function cloudList() {
+  if (!cloudSyncEnabled || !authToken || !currentUser) return [];
+  try {
+    const {ok, data} = await apiPost('/api/files', {
+      action:'list', username:currentUser.username, token:authToken
+    });
+    return ok && data.success ? data.files : [];
+  } catch(_) { return []; }
+}
+
+async function cloudRename(path, newPath) {
+  if (!cloudSyncEnabled || !authToken || !currentUser) return false;
+  try {
+    const {ok} = await apiPost('/api/files', {
+      action:'rename', username:currentUser.username, token:authToken, path, newPath
+    });
+    return ok;
+  } catch(_) { return false; }
+}
+
+async function syncFromCloud() {
+  // Pull all cloud files into local VFS on login
+  if (!cloudSyncEnabled) return;
+  pd('Syncing files from cloud…');
+  try {
+    const files = await cloudList();
+    if (!files.length) { pd('No cloud files found.'); return; }
+    for (const meta of files) {
+      const content = await cloudRead(meta.path);
+      if (content !== null) {
+        // Ensure parent dirs exist
+        const parts = meta.path.split('/').filter(Boolean);
+        let p = '';
+        for (let i = 0; i < parts.length - 1; i++) {
+          p += '/' + parts[i];
+          if (!vfsExists(p)) vfsMkdir(p, {parents:true});
+        }
+        vfsWrite(meta.path, content);
+      }
+    }
+    pok(`Synced ${files.length} file(s) from cloud.`);
+  } catch(e) {
+    pd('Cloud sync: ' + e.message);
+  }
+}
 let awaitingInput = null;   // {mode:'password'|'email'|'reset-code'|'new-password'}
 let pyodide = null;
 let pyodideReady = false;
@@ -535,7 +628,7 @@ async function handleInput(val) {
     if (ok && data.success) {
       awaitingInput = null;
       inputEl.type = 'text';
-      enterShell(data.user);
+      enterShell(data.user, passwordHash); // pass hash as auth token
     } else {
       pe(data.error || 'Invalid username or password.');
       print('Password: (or type "forgot")','info');
@@ -615,7 +708,7 @@ async function handleInput(val) {
     inputEl.type = 'text';
     // Auto login
     const loginRes = await apiPost('/api/login', {username, passwordHash});
-    enterShell(loginRes.data.user || {username, email});
+    enterShell(loginRes.data.user || {username, email}, passwordHash);
     return;
   }
 
@@ -755,12 +848,18 @@ async function startForgot(username) {
   }
 }
 
-function enterShell(user) {
+function enterShell(user, token) {
   loggedIn = true;
   currentUser = user;
+  authToken = token || null;
+  cloudSyncEnabled = !!token;
   envVars.USER = user.username || 'user';
   print('');
   pok('Logged in as ' + (user.username || 'user'));
+  if (cloudSyncEnabled) {
+    pd('Cloud file sync enabled — files saved here are accessible on any device.');
+    syncFromCloud();
+  }
   pd('Type "help" for commands. "lx run" for scripting engine.');
   print('');
   updatePrompt();
@@ -976,7 +1075,7 @@ const ALL_CMDS=['ls','cd','pwd','mkdir','rmdir','touch','rm','cat','echo','cp','
   'curl','wget','open','xdg-open','camera','webcam','mic','microphone','geolocate',
   'location','battery','sysinfo','netinfo','ifconfig','lscpu','lsusb','lspci',
   'clipboard','notify','upload','download','perms','passwd','lx','lxpkg',
-  'lixpy','wipe','clear','help','exit','awk','sed','diff','ln','stat','file','strings','od','xxd','nl','rev','fold','paste','printf','which','type','alias','unalias','expr','bc','factor','printenv','set','unset','id','groups','hostname','arch','lsb_release','w','who','last','cal','nano','vi','vim','emacs','man','source','true','false'];
+  'lixpy','wipe','cloud','clear','help','exit','awk','sed','diff','ln','stat','file','strings','od','xxd','nl','rev','fold','paste','printf','which','type','alias','unalias','expr','bc','factor','printenv','set','unset','id','groups','hostname','arch','lsb_release','w','who','last','cal','nano','vi','vim','emacs','man','source','true','false'];
 
 function tabComplete(partial) {
   const parts=partial.split(' ');
@@ -1052,6 +1151,7 @@ const HELP=`
 │ passwd                       │ Change password (requires current pw)     │
 │ lixpy                        │ LixPy system info                        │
 │ lixpy storage wipe / wipe    │ Wipe ALL data + account (reloads page)    │
+│ cloud ls/pull/push/sync      │ Cloud file management (cross-device)      │
 ├──────────────────────────────┼──────────────────────────────────────────┤
 │ TEXT PROCESSING              │                                          │
 │ awk '{print $N}' <file>      │ Extract fields from text                 │
@@ -2118,6 +2218,46 @@ async function runCmd(com) {
     return;
   }
 
+
+    // ── cloud ────────────────────────────────────────────────────────────────
+  if (base==='cloud') {
+    if (!cloudSyncEnabled) { pe('Cloud sync not enabled — log in first.'); return; }
+    if (args[0]==='pull' || com==='cloud pull') {
+      pw('Pulling all files from cloud…');
+      await syncFromCloud();
+    } else if (args[0]==='push' || com==='cloud push') {
+      pw('Pushing all local /home files to cloud…');
+      const allFiles = vfsWalk('/home').filter(e=>e.type==='file');
+      let count = 0;
+      for (const f of allFiles) {
+        const ok = await cloudSave(f.path, vfsNode(f.path).content);
+        if (ok) count++;
+      }
+      pok(`Pushed ${count} file(s) to cloud.`);
+    } else if (args[0]==='ls' || args[0]==='list' || com==='cloud ls') {
+      pw('Cloud files for ' + currentUser.username + ':');
+      const files = await cloudList();
+      if (!files.length) { pd('  (no cloud files)'); return; }
+      files.forEach(f => print(`  ${f.path}  (${f.size} bytes, ${new Date(f.updatedAt).toLocaleString()})`));
+    } else if (args[0]==='sync' || com==='cloud sync') {
+      pw('Syncing…');
+      // Push local then pull remote
+      const allFiles = vfsWalk('/home').filter(e=>e.type==='file');
+      for (const f of allFiles) {
+        await cloudSave(f.path, vfsNode(f.path).content).catch(()=>{});
+      }
+      await syncFromCloud();
+      pok('Sync complete.');
+    } else {
+      pc('Cloud file sync — commands:');
+      print('  cloud ls      List all cloud files');
+      print('  cloud pull    Download all cloud files to local VFS');
+      print('  cloud push    Upload all local /home files to cloud');
+      print('  cloud sync    Push then pull (full sync)');
+      pd('  Files in /home are auto-synced when created, edited, or deleted.');
+    }
+    return;
+  }
 
     pe(`${base}: command not found  (type "help" for commands)`);
 }
