@@ -76,13 +76,14 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
   font-family:var(--font);
   /* Coloring done via spans inside */
 }
-/* prompt parts */
+/* prompt parts — matches GitHub Codespaces style */
 .pr-user{color:#88ff44;font-weight:bold}
-.pr-at{color:var(--dim)}
-.pr-host{color:#44aaff;font-weight:bold}
-.pr-sep{color:var(--dim)}
-.pr-path{color:#00ffff;font-weight:bold}
-.pr-dollar{color:#ffffff;font-weight:bold;margin-right:5px}
+.pr-at{color:#555;font-weight:normal}
+.pr-host{color:#88ff44;font-weight:bold}
+.pr-arrow{color:#ff6ac1;font-weight:bold;margin:0 4px}
+.pr-path{color:#00cfff;font-weight:bold}
+.pr-branch{color:#ffcc00;font-style:normal;margin:0 4px}
+.pr-dollar{color:#ffffff;font-weight:bold;margin-left:2px;margin-right:6px}
 /* password/special prompts */
 .pr-special{color:var(--yellow);font-weight:bold}
 
