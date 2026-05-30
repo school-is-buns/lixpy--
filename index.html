@@ -168,11 +168,12 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
     <span id="brand">LixPy</span>
     <span id="wasmStatus">engine: loading…</span>
   </div>
-  <div id="output"></div>
-  <div id="input-row">
+  <div id="terminal">
+    <div id="output"></div>
+    <div id="input-row">
     <span id="prompt-label">$ </span>
     <input id="cmd-input" type="text" autocomplete="off" autocorrect="off"
-           autocapitalize="off" spellcheck="false" placeholder="type a command…">
+           autocapitalize="off" spellcheck="false" placeholder="">
 
   </div>
 </div>
@@ -2983,6 +2984,54 @@ editorOverlay.addEventListener('click', e=>{
   if (inEditorMode && e.target!==editorTA) { editorTA.focus(); updateEditorStatus(); }
 });
 
+
+
+const LIXPY_CHANGELOG = [
+  {
+    version: '2.1.0',
+    date: '2025-05-29',
+    changes: [
+      'Real nano/vi editor — type inline anywhere in the file',
+      'Linux-style colored prompt (user@lixpy:~/path$)',
+      'Cross-device cloud file sync via Upstash Redis',
+      'lx run <file> — run a VFS script file directly',
+      'update command — this changelog',
+      'wipe now only wipes account, not cloud files',
+      'html-preview, json-validate, css-check, urlencode/decode',
+      'calc, primes, fibonacci, roman, lorem, rot13, wordcount',
+      'banner, matrix, clock, timer, countdown, password-gen',
+      'hash, uuid, timestamp, json-to-csv, csv-to-json, myip',
+      'status-code, headers, serve',
+    ]
+  },
+  {
+    version: '2.0.0',
+    date: '2025-05-28',
+    changes: [
+      'Username + password login (cross-device via Vercel + Upstash)',
+      'Email verification on signup',
+      'Password reset via 6-digit email code',
+      'passwd command requires email verification for security',
+      '121+ Linux commands implemented in browser',
+      'Scripting engine via Pyodide WASM (lx run)',
+      'Camera, mic, GPS, battery, clipboard, notifications',
+      'Cloud file sync — files accessible on any device',
+      'nano/vi/vim text editor',
+      'awk, sed, diff, cal, bc, factor, alias, source + more',
+    ]
+  },
+  {
+    version: '1.0.0',
+    date: '2025-05-20',
+    changes: [
+      'Initial release',
+      'Basic Linux commands (ls, cd, cat, echo, grep, etc.)',
+      'In-browser virtual filesystem',
+      'Password auth via localStorage',
+      'Camera, mic, GPS hardware access',
+    ]
+  },
+];
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  BOOT
