@@ -671,6 +671,73 @@ async function apiPost(endpoint, body) {
   return { ok: resp.ok, status: resp.status, data };
 }
 
+
+function updatePrompt() {
+  if (!promptEl) return;
+  promptEl.innerHTML = '';
+
+  // Not logged in, no auth in progress — blank
+  if (!awaitingInput && !loggedIn) {
+    promptEl.innerHTML = '';
+    return;
+  }
+
+  // Auth prompts
+  if (awaitingInput) {
+    const labels = {
+      'username':           'username: ',
+      'login-password':     'password: ',
+      'signup-username':    'new username: ',
+      'signup-email':       'email address: ',
+      'signup-email-verify':'verification code: ',
+      'signup-password':    'create password: ',
+      'signup-confirm':     'confirm password: ',
+      'forgot-username':    'your username: ',
+      'forgot-email':       'account email: ',
+      'forgot-code':        'reset code: ',
+      'forgot-new-pw':      'new password: ',
+      'forgot-confirm-pw':  'confirm password: ',
+      'passwd-verify':      'current password: ',
+      'passwd-email-code':  'verification code: ',
+      'passwd-new':         'new password: ',
+      'passwd-confirm':     'confirm password: ',
+    };
+    const label = labels[awaitingInput.mode] || '> ';
+    promptEl.innerHTML = `<span style="color:#ffcc00;font-weight:bold">${label}</span>`;
+    return;
+  }
+
+  // LX scripting engine REPL
+  if (inLxMode) {
+    const lbl = lxBuffer.trim() ? '... ' : '&gt;&gt;&gt; ';
+    promptEl.innerHTML = `<span style="color:#cc88ff;font-weight:bold">${lbl}</span>`;
+    return;
+  }
+
+  // Editor mode — no prompt
+  if (inEditorMode) {
+    promptEl.innerHTML = '';
+    return;
+  }
+
+  // Normal shell — GitHub Codespaces style:
+  // user@lixpy ➜ ~/path (main) $
+  const user    = envVars.USER || 'user';
+  const host    = 'lixpy';
+  const home    = envVars.HOME || '/home';
+  const rawPath = cwd.startsWith(home) ? '~' + cwd.slice(home.length) : cwd;
+  const path    = rawPath || '~';
+
+  promptEl.innerHTML =
+    `<span style="color:#88ff44;font-weight:bold">${user}</span>` +
+    `<span style="color:#555">@</span>` +
+    `<span style="color:#88ff44;font-weight:bold">${host}</span>` +
+    `<span style="color:#ff6ac1;font-weight:bold;margin:0 5px">➜</span>` +
+    `<span style="color:#00cfff;font-weight:bold">${path}</span>` +
+    `<span style="color:#ffcc00;font-weight:bold;margin:0 4px">(main)</span>` +
+    `<span style="color:#fff;font-weight:bold;margin-right:6px">$</span>`;
+}
+
 async function startAuth() {
   print('');
   print('Welcome to LixPy.','out');
@@ -1146,7 +1213,7 @@ inputEl.addEventListener('keydown', async e => {
     }
     if (inEditorMode) { editorContent.focus(); return; } // editor handles its own input
     if (!val.trim()) return;
-    print(promptEl.innerText+val,'cmd');
+    print((promptEl.innerText||'').replace(/\n/g,'') + val, 'cmd');
     cmdHistory.push(val);
     if (micStream) closeMic();
     await runCmd(val.trim());
@@ -1303,7 +1370,7 @@ async function runCmd(com) {
   if (com==='help')  { print(HELP); return; }
   if (com==='exit')  {
     loggedIn=false; closeCam(); closeMic();
-    print('Goodbye!'); promptEl.textContent='$ ';
+    print('Goodbye!'); promptEl.innerHTML = '';
     pd('(Refresh to log back in.)'); return;
   }
   if (com==='passwd') {
@@ -2121,7 +2188,7 @@ async function runCmd(com) {
       const lines = script.split('\n').filter(l=>l.trim()&&!l.startsWith('#'));
       print(`Running ${lines.length} commands from ${args[0]}…`,'info');
       for (const line of lines) {
-        print(promptEl.textContent+line,'cmd');
+        print((promptEl.innerText||'').replace(/\n/g,'') + line, 'cmd');
         await runCmd(line.trim());
       }
       pok(`Done running ${args[0]}`);
@@ -2316,7 +2383,7 @@ async function runCmd(com) {
   // ── check user aliases ────────────────────────────────────────────────────
   if (userAliases[base]) {
     const expanded = userAliases[base] + (args.length?' '+args.join(' '):'');
-    print(promptEl.textContent+expanded,'dim');
+    print((promptEl.innerText||'').replace(/\n/g,'') + expanded, 'dim');
     await runCmd(expanded);
     return;
   }
