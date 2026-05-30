@@ -33,6 +33,7 @@
 html,body{height:100%;background:var(--bg);color:var(--green);font-family:var(--font);font-size:14px;line-height:1.5;overflow:hidden}
 body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradient(to bottom,transparent 0,transparent 2px,rgba(0,0,0,.13) 2px,rgba(0,0,0,.13) 4px);pointer-events:none;z-index:998}
 #app{display:flex;flex-direction:column;height:100vh;max-width:980px;margin:0 auto;border-left:1px solid var(--border);border-right:1px solid var(--border);animation:fadeIn .4s ease}
+#terminal{flex:1;overflow-y:auto;display:flex;flex-direction:column;cursor:text;padding:10px 14px 10px}
 @keyframes fadeIn{from{opacity:0}to{opacity:1}}
 
 /* ── title bar ── */
@@ -43,10 +44,10 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
 #wasmStatus{font-size:11px;color:var(--yellow);flex-shrink:0;white-space:nowrap}
 
 /* ── terminal output ── */
-#output{flex:1;overflow-y:auto;padding:10px 14px 0;white-space:pre-wrap;word-break:break-word}
-#output::-webkit-scrollbar{width:5px}
-#output::-webkit-scrollbar-track{background:var(--bg)}
-#output::-webkit-scrollbar-thumb{background:var(--dim);border-radius:3px}
+#output{flex:1;white-space:pre-wrap;word-break:break-word;padding:0}
+#terminal::-webkit-scrollbar{width:5px}
+#terminal::-webkit-scrollbar-track{background:var(--bg)}
+#terminal::-webkit-scrollbar-thumb{background:var(--dim);border-radius:3px}
 .line{display:block;min-height:1.4em}
 .line.cmd{color:var(--white)}
 .line.out{color:var(--green)}
@@ -59,12 +60,16 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
 .line.py{color:#f0c040}
 .line.lx{color:#cc88ff}
 
-/* ── inline input row (Linux-style — prompt + input on same line) ── */
+/* ── inline input row — sits directly below output, same font ── */
 #input-row{
-  display:flex;align-items:center;
-  padding:2px 14px 10px;
+  display:flex;
+  align-items:baseline;
+  padding:0;
   background:transparent;
-  gap:0;flex-shrink:0;
+  gap:0;
+  flex-shrink:0;
+  margin-top:2px;
+  padding-bottom:4px;
 }
 #prompt-label{
   white-space:nowrap;font-size:14px;
@@ -81,11 +86,10 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
 /* password/special prompts */
 .pr-special{color:var(--yellow);font-weight:bold}
 
-#cmd-input{flex:1;background:transparent;border:none;outline:none;color:var(--white);font-family:var(--font);font-size:14px;caret-color:#ffffff}
+#cmd-input{flex:1;background:transparent;border:none;outline:none;color:var(--white);font-family:var(--font);font-size:14px;line-height:1.4;caret-color:#ffffff;padding:0;margin:0}
 #cmd-input::placeholder{color:var(--dim)}
 #cmd-input[type=password]{color:var(--green);letter-spacing:3px}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
-#cursor{display:inline-block;width:9px;height:15px;background:#ffffff;vertical-align:middle;opacity:0.9;animation:blink 1.1s step-end infinite}
 
 /* ── modals ── */
 .modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:1000;flex-direction:column;align-items:center;justify-content:center;padding:20px;gap:12px}
@@ -169,7 +173,7 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
     <span id="prompt-label">$ </span>
     <input id="cmd-input" type="text" autocomplete="off" autocorrect="off"
            autocapitalize="off" spellcheck="false" placeholder="type a command…">
-    <span id="cursor"></span>
+
   </div>
 </div>
 
@@ -549,7 +553,7 @@ function print(text='', cls='out') {
     s.textContent = line;
     outputEl.appendChild(s);
   });
-  outputEl.scrollTop = outputEl.scrollHeight;
+  const term = document.getElementById('terminal'); if(term) term.scrollTop = term.scrollHeight; else outputEl.scrollTop = outputEl.scrollHeight;
 }
 const pe  = t => print(t,'err');
 const pd  = t => print(t,'dim');
@@ -561,7 +565,7 @@ const plx = t => print(t,'lx');
 
 function cls() {
   outputEl.innerHTML = '';
-  print('LixPy  —  by Ozzie E.','dim');
+  
   print('');
 }
 
@@ -937,12 +941,12 @@ function enterShell(user, token) {
   cloudSyncEnabled = !!token;
   envVars.USER = user.username || 'user';
   print('');
-  pok('Logged in as ' + (user.username || 'user'));
+  pok('Welcome back, ' + (user.username || 'user') + '!');
   if (cloudSyncEnabled) {
-    pd('Cloud file sync enabled — files saved here are accessible on any device.');
+    pd('Cloud file sync ON — files sync across all your devices.');
     syncFromCloud();
   }
-  pd('Type "help" for commands. "lx run" for scripting engine.');
+  pd('Type "help" for all commands.');
   print('');
   updatePrompt();
 }
@@ -1148,6 +1152,7 @@ inputEl.addEventListener('keydown', async e => {
   }
 });
 document.addEventListener('click', ()=>inputEl.focus());
+document.getElementById('terminal').addEventListener('click', ()=>inputEl.focus());
 inputEl.focus();
 
 // Tab-complete
@@ -2984,8 +2989,7 @@ editorOverlay.addEventListener('click', e=>{
 // ─────────────────────────────────────────────────────────────────────────────
 async function boot() {
   cls();
-  print('LixPy beta','out');
-  pd('Initializing…');
+  print('');
   // Start engine in background — don't block auth
   initEngine();
   await new Promise(r=>setTimeout(r,200));
