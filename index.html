@@ -44,7 +44,7 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
 #wasmStatus{font-size:11px;color:var(--yellow);flex-shrink:0;white-space:nowrap}
 
 /* ── terminal output ── */
-#output{flex:1;white-space:pre-wrap;word-break:break-word;padding:0}
+#output{flex:1;white-space:pre-wrap;word-break:break-word;padding:0;min-height:20px}
 #terminal::-webkit-scrollbar{width:5px}
 #terminal::-webkit-scrollbar-track{background:var(--bg)}
 #terminal::-webkit-scrollbar-thumb{background:var(--dim);border-radius:3px}
@@ -82,7 +82,7 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
 .pr-host{color:#44aaff;font-weight:bold}
 .pr-sep{color:var(--dim)}
 .pr-path{color:#00ffff;font-weight:bold}
-.pr-dollar{color:#ffffff;font-weight:bold;margin-right:6px}
+.pr-dollar{color:#ffffff;font-weight:bold;margin-right:5px}
 /* password/special prompts */
 .pr-special{color:var(--yellow);font-weight:bold}
 
@@ -171,7 +171,7 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
   <div id="terminal">
     <div id="output"></div>
     <div id="input-row">
-    <span id="prompt-label">$ </span>
+    <span id="prompt-label"></span>
     <input id="cmd-input" type="text" autocomplete="off" autocorrect="off"
            autocapitalize="off" spellcheck="false" placeholder="">
 
@@ -1348,7 +1348,25 @@ async function runCmd(com) {
   }
 
   // ── lx run — scripting engine ─────────────────────────────────────────────
-  if (com==='lx run' || com==='lx') { await enterLxRepl(); return; }
+  // ── lx — scripting engine or run file ────────────────────────────────────
+  if (base==='lx') {
+    // lx run <file> — run a VFS file as a script
+    if (args[0]==='run' && args[1]) {
+      if (!pyodideReady){pw('Engine not ready — wait a moment.');return;}
+      const fname = args[1];
+      try {
+        const code = vfsRead(fname);
+        plx(`Running ${fname}…`);
+        await pyodide.runPythonAsync(code);
+      } catch(e) {
+        pe(String(e).split('\n').filter(l=>l.trim()).slice(-3).join('\n'));
+      }
+      return;
+    }
+    // lx run (no file) or just lx — open REPL
+    await enterLxRepl();
+    return;
+  }
 
   // ── lxpkg install — engine package manager ────────────────────────────────
   if (base==='lxpkg' && args[0]==='install') {
@@ -2358,19 +2376,7 @@ async function runCmd(com) {
     return;
   }
 
-  // ── lx run <file> — run a script file as Python ───────────────────────────
-  if (base==='lx' && args[0]==='run' && args[1]) {
-    if (!pyodideReady){pw('Engine not ready yet.');return;}
-    const fname = args[1];
-    try {
-      const code = vfsRead(fname);
-      plx(`Running ${fname}…`);
-      await pyodide.runPythonAsync(code);
-    } catch(e) {
-      pe(String(e).split('\n').filter(l=>l.trim()).slice(-3).join('\n'));
-    }
-    return;
-  }
+
 
   // ── html-preview — open HTML from VFS in new tab ──────────────────────────
   if (base==='html-preview'||base==='preview') {
