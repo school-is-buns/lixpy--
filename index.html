@@ -44,7 +44,7 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
 #wasmStatus{font-size:11px;color:var(--yellow);flex-shrink:0;white-space:nowrap}
 
 /* ── terminal output ── */
-#output{flex:1;white-space:pre-wrap;word-break:break-word;padding:0;min-height:20px}
+#output{white-space:pre-wrap;word-break:break-word;padding:0}
 #terminal::-webkit-scrollbar{width:5px}
 #terminal::-webkit-scrollbar-track{background:var(--bg)}
 #terminal::-webkit-scrollbar-thumb{background:var(--dim);border-radius:3px}
@@ -1213,7 +1213,15 @@ inputEl.addEventListener('keydown', async e => {
     }
     if (inEditorMode) { editorContent.focus(); return; } // editor handles its own input
     if (!val.trim()) return;
-    print((promptEl.innerText||'').replace(/\n/g,'') + val, 'cmd');
+    // Print colored prompt + command inline
+(function(){
+  const line = document.createElement('span');
+  line.className = 'line cmd';
+  line.innerHTML = (promptEl.innerHTML||'') +
+    `<span style="color:#e0ffe0">${val.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</span>`;
+  outputEl.appendChild(line);
+  const _t=document.getElementById('terminal');if(_t)_t.scrollTop=_t.scrollHeight;
+})();
     cmdHistory.push(val);
     if (micStream) closeMic();
     await runCmd(val.trim());
