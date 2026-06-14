@@ -622,56 +622,8 @@ async function initEngine() {
       lockFileURL: 'https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide-lock.json',
     });
 
-    // Wire stdout/stderr/input/getpass → our terminal
-    pyodide.runPython(`
-import sys, builtins
-
-class _TW:
-    def write(self, s):
-        if s:
-            import js
-            js._lxPrint(s)
-    def flush(self): pass
-
-sys.stdout = sys.stderr = _TW()
-
-# Wire input() to browser prompt
-def _input(prompt=''):
-    import js
-    if prompt:
-        js._lxPrint(str(prompt))
-    result = js.prompt(str(prompt) if prompt else 'Enter input:')
-    if result is None:
-        raise EOFError('Input cancelled')
-    js._lxPrint(result + '\\n')
-    return result
-
-builtins.input = _input
-
-# Wire getpass.getpass() to a masked browser prompt
-# Browser doesn't support hidden input in prompt(), so we use a special
-# JS function that shows a password-style dialog
-def _getpass(prompt='Password: ', stream=None):
-    import js
-    if prompt:
-        js._lxPrint(str(prompt))
-    # Use our custom masked prompt (shows * characters in dialog title)
-    result = js._lxGetpass(str(prompt) if prompt else 'Password: ')
-    if result is None:
-        raise EOFError('Input cancelled')
-    js._lxPrint('*' * len(result) + '\\n')  # echo asterisks like real getpass
-    return result
-
-# Patch getpass module
-try:
-    import getpass as _gp_module
-    _gp_module.getpass = _getpass
-    _gp_module.fallback_getpass = _getpass
-    # Also patch at module level so 'from getpass import getpass' works
-    sys.modules['getpass'].getpass = _getpass
-except Exception as e:
-    pass
-`);
+    // Wire stdout/stderr/input/getpass to terminal
+    pyodide.runPython("import sys, builtins\n\nclass _TW:\n    def write(self, s):\n        if s:\n            import js\n            js._lxPrint(s)\n    def flush(self): pass\n\nsys.stdout = sys.stderr = _TW()\n\ndef _input(prompt=''):\n    import js\n    if prompt: js._lxPrint(str(prompt))\n    r = js.prompt(str(prompt) if prompt else 'Input:')\n    if r is None: raise EOFError('cancelled')\n    js._lxPrint(r + chr(10))\n    return r\n\nbuiltins.input = _input\n\ndef _getpass(prompt='Password: ', stream=None):\n    import js\n    if prompt: js._lxPrint(str(prompt))\n    r = js.prompt(str(prompt) if prompt else 'Password:')\n    if r is None: raise EOFError('cancelled')\n    js._lxPrint(chr(42) * min(len(r), 8) + chr(10))\n    return r\n\ntry:\n    import getpass as _g\n    _g.getpass = _getpass\n    _g.fallback_getpass = _getpass\n    import sys as _s\n    _s.modules['getpass'].getpass = _getpass\nexcept Exception:\n    pass");
     pyodideReady = true;
     wasmStatus.textContent = 'engine: ready ✓';
     wasmStatus.style.color = 'var(--green)';
@@ -1521,33 +1473,12 @@ async function runCmd(com) {
       try {
         const code = vfsRead(fname);
         plx(`Running ${fname}…`);
-        // Pre-patch: make _lxGetpass synchronous-compatible via Pyodide's
-        // syncify or fall back to prompt() if not available
-        await pyodide.runPythonAsync(`
-import js, builtins, sys
-
-async def _getpass_async(prompt='Password: ', stream=None):
-    if prompt:
-        js._lxPrint(str(prompt))
-    result = await js._lxGetpass(str(prompt) if prompt else 'Password: ')
-    if result is None:
-        raise EOFError('Input cancelled')
-    js._lxPrint('*' * len(result) + '\n')
-    return result
-
-try:
-    import getpass as _gm
-    _gm.getpass = _getpass_async
-    sys.modules['getpass'].getpass = _getpass_async
-except Exception:
-    pass
-`);
         await pyodide.runPythonAsync(code);
         plx(`${fname} finished.`);
       } catch(e) {
         const lines = String(e).split('\n').filter(l=>l.trim());
         const isSyntax = String(e).includes('SyntaxError');
-        pe(isSyntax ? lines.join('\n') : lines.slice(-4).join('\n'));
+        pe(isSyntax ? lines.join('\n') : lines.slice(-5).join('\n'));
       }
       return;
     }
